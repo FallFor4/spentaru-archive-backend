@@ -649,6 +649,8 @@ class ApiEndpointTest extends TestCase
             ],
         ], 200));
 
+        config(['services.ai_gateway.enabled' => true]);
+
         $admin = $this->actingAsRole('admin');
         $archive = $this->archiveWithFile(['uploader_model' => $admin]);
 
@@ -897,6 +899,7 @@ class ApiEndpointTest extends TestCase
     public function test_ai_chat_proxy_requires_trace_id_passes_through_success_and_handles_tool_auth(): void
     {
         config([
+            'services.ai_gateway.enabled' => true,
             'services.ai_gateway.base_url' => 'http://ai-service.test',
             'services.ai_tool.access_key' => 'tool-secret',
         ]);

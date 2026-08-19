@@ -17,6 +17,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Support\Str as SupportStr;
@@ -369,6 +370,9 @@ class ArchiveController extends Controller
             'retention_status' => 'active',
         ]);
 
+        $vector_id = (string) Str::uuid();
+        $extraction_status = 'pending';
+
         try {
             $archive = DB::transaction(function () use ($payload, $req_archive) {
                 $archive = Archive::create($payload);
@@ -377,53 +381,63 @@ class ArchiveController extends Controller
                 return $archive;
             });
 
-            $cat = ArchiveCategory::find($req_archive['category_id']);
-            $sub = isset($req_archive['subcategory_id']) ? Subcategory::find($req_archive['subcategory_id']) : null;
+            if (config('services.ai_gateway.enabled', false)) {
+                $cat = ArchiveCategory::find($req_archive['category_id']);
+                $sub = isset($req_archive['subcategory_id']) ? Subcategory::find($req_archive['subcategory_id']) : null;
 
-            $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
-            $aiTimeout = (int) config('services.ai_gateway.timeout', 15);
+                $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
+                $aiTimeout = (int) config('services.ai_gateway.timeout', 15);
 
-            $http = Http::timeout($aiTimeout)->asMultipart();
-            $aiServiceKey = config('services.ai_gateway.api_key', '');
-            if ($aiServiceKey) {
-                $http->withHeader('X-AI-Service-Key', $aiServiceKey);
+                $http = Http::timeout($aiTimeout)->asMultipart();
+                $aiServiceKey = config('services.ai_gateway.api_key', '');
+                if ($aiServiceKey) {
+                    $http->withHeader('X-AI-Service-Key', $aiServiceKey);
+                }
+
+                try {
+                    $response = $http->post("{$aiBaseUrl}/api/extract/text", [
+                        [
+                            'name' => 'file',
+                            'contents' => file_get_contents($file->getRealPath()),
+                            'filename' => $filename,
+                        ],
+                        [
+                            'name' => 'archive_id',
+                            'contents' => (string) $archive->id,
+                        ],
+                        [
+                            'name' => 'title',
+                            'contents' => $archive->title ?? '',
+                        ],
+                        [
+                            'name' => 'year',
+                            'contents' => (string) ($archive->year ?? ''),
+                        ],
+                        [
+                            'name' => 'category',
+                            'contents' => $cat?->name ?? '',
+                        ],
+                        [
+                            'name' => 'subcategory',
+                            'contents' => $sub?->name ?? '',
+                        ],
+                    ]);
+
+                    if ($response->successful()) {
+                        $vector_id = $response->json()['data']['vector_id'] ?? $vector_id;
+                        $extraction_status = 'done';
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning('AI extraction failed or unreachable, continuing without AI indexing: '.$e->getMessage());
+                }
             }
-            $response = $http->post("{$aiBaseUrl}/api/extract/text", [
-                [
-                    'name' => 'file',
-                    'contents' => file_get_contents($file->getRealPath()),
-                    'filename' => $filename,
-                ],
-                [
-                    'name' => 'archive_id',
-                    'contents' => (string) $archive->id,
-                ],
-                [
-                    'name' => 'title',
-                    'contents' => $archive->title ?? '',
-                ],
-                [
-                    'name' => 'year',
-                    'contents' => (string) ($archive->year ?? ''),
-                ],
-                [
-                    'name' => 'category',
-                    'contents' => $cat?->name ?? '',
-                ],
-                [
-                    'name' => 'subcategory',
-                    'contents' => $sub?->name ?? '',
-                ],
-            ]);
-
-            $vector_id = $response->json()['data']['vector_id'];
 
             $payload_file = [
                 'file_name' => $filename,
                 'file_size' => $file->getSize(),
                 'file_type' => strtolower($file->getClientOriginalExtension()),
                 'vector_id' => $vector_id,
-                'extraction_status' => 'done',
+                'extraction_status' => $extraction_status,
             ];
 
             $archive->files()->create($payload_file);
@@ -508,58 +522,68 @@ class ArchiveController extends Controller
         $vectorId = null;
 
         try {
-            // Kirim file ke AI service; OCR text/vector disimpan di service AI/Qdrant.
-            $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
-            $aiTimeout = (int) config('services.ai_gateway.timeout', 15);
-            $http = Http::timeout($aiTimeout)->asMultipart();
-            $aiServiceKey = config('services.ai_gateway.api_key', '');
-            if ($aiServiceKey) {
-                $http->withHeader('X-AI-Service-Key', $aiServiceKey);
-            }
-
-            $categoryId = $archiveData['category_id'] ?? $archive->category_id;
-            $subcategoryId = array_key_exists('subcategory_id', $archiveData)
-                ? $archiveData['subcategory_id']
-                : $archive->subcategory_id;
-            $cat = ArchiveCategory::find($categoryId);
-            $sub = $subcategoryId ? Subcategory::find($subcategoryId) : null;
-            $vectorId = $archive->files()->value('vector_id');
-            $multipartPayload = [
-                [
-                    'name' => 'archive_id',
-                    'contents' => (string) $archive->id,
-                ],
-            ];
-
             if ($request->hasFile('file')) {
                 $file = $request->file('file');
                 $filename = $this->makeArchiveFilename($file);
                 $storedPath = $this->storeArchiveFile($file, $filename);
-
-                $multipartPayload[] = [
-                    'name' => 'file',
-                    'contents' => file_get_contents($file->getRealPath()),
-                    'filename' => $filename,
-                ];
             }
 
-            foreach ([
-                'title' => $archiveData['title'] ?? null,
-                'year' => $archiveData['year'] ?? null,
-                'category' => $categoryChanged ? $cat?->name : null,
-                'subcategory' => $subcategoryChanged ? $sub?->name : null,
-            ] as $name => $contents) {
-                if ($contents === null || $contents === '') {
-                    continue;
+            $vectorId = $archive->files()->value('vector_id');
+
+            // Kirim file ke AI service jika AI enabled
+            if (config('services.ai_gateway.enabled', false) && $vectorId) {
+                try {
+                    $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
+                    $aiTimeout = (int) config('services.ai_gateway.timeout', 15);
+                    $http = Http::timeout($aiTimeout)->asMultipart();
+                    $aiServiceKey = config('services.ai_gateway.api_key', '');
+                    if ($aiServiceKey) {
+                        $http->withHeader('X-AI-Service-Key', $aiServiceKey);
+                    }
+
+                    $categoryId = $archiveData['category_id'] ?? $archive->category_id;
+                    $subcategoryId = array_key_exists('subcategory_id', $archiveData)
+                        ? $archiveData['subcategory_id']
+                        : $archive->subcategory_id;
+                    $cat = ArchiveCategory::find($categoryId);
+                    $sub = $subcategoryId ? Subcategory::find($subcategoryId) : null;
+
+                    $multipartPayload = [
+                        [
+                            'name' => 'archive_id',
+                            'contents' => (string) $archive->id,
+                        ],
+                    ];
+
+                    if ($file && $filename) {
+                        $multipartPayload[] = [
+                            'name' => 'file',
+                            'contents' => file_get_contents($file->getRealPath()),
+                            'filename' => $filename,
+                        ];
+                    }
+
+                    foreach ([
+                        'title' => $archiveData['title'] ?? null,
+                        'year' => $archiveData['year'] ?? null,
+                        'category' => $categoryChanged ? $cat?->name : null,
+                        'subcategory' => $subcategoryChanged ? $sub?->name : null,
+                    ] as $name => $contents) {
+                        if ($contents === null || $contents === '') {
+                            continue;
+                        }
+
+                        $multipartPayload[] = [
+                            'name' => $name,
+                            'contents' => (string) $contents,
+                        ];
+                    }
+
+                    $http->patch("{$aiBaseUrl}/api/vector/{$vectorId}", $multipartPayload);
+                } catch (\Throwable $e) {
+                    Log::warning('AI patch update failed: '.$e->getMessage());
                 }
-
-                $multipartPayload[] = [
-                    'name' => $name,
-                    'contents' => (string) $contents,
-                ];
             }
-
-            $response = $http->patch("{$aiBaseUrl}/api/vector/{$vectorId}", $multipartPayload);
 
             DB::transaction(function () use ($archive, $archiveData, $file, $filename, $vectorId, $needsRelocation, $oldRack) {
                 if ($archiveData !== []) {
@@ -571,7 +595,7 @@ class ArchiveController extends Controller
                         'file_name' => $filename,
                         'file_size' => $file->getSize(),
                         'file_type' => strtolower($file->getClientOriginalExtension()),
-                        'vector_id' => $vectorId,
+                        'vector_id' => $vectorId ?: (string) Str::uuid(),
                         'extraction_status' => 'done',
                     ]);
                 }
@@ -612,15 +636,17 @@ class ArchiveController extends Controller
     {
         $archive = Archive::with(['files', 'physicalLocation.rack'])->findOrFail($id);
         $file = $archive->files;
-        $vector_id = $file->vector_id;
-        $aiTimeout = (int) config('services.ai_gateway.timeout', 15);
+        $vector_id = $file?->vector_id;
 
-        $http = Http::timeout($aiTimeout)->asJson();
-        $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
-        try {
-            $http->delete("{$aiBaseUrl}/api/vector/{$vector_id}");
-        } catch (\Throwable $th) {
-            throw $th;
+        if (config('services.ai_gateway.enabled', false) && $vector_id) {
+            $aiTimeout = (int) config('services.ai_gateway.timeout', 15);
+            $http = Http::timeout($aiTimeout)->asJson();
+            $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
+            try {
+                $http->delete("{$aiBaseUrl}/api/vector/{$vector_id}");
+            } catch (\Throwable $th) {
+                Log::warning('AI delete vector failed: '.$th->getMessage());
+            }
         }
 
         DB::transaction(function () use ($archive) {

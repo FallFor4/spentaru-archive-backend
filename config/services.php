@@ -36,6 +36,7 @@ return [
     ],
 
     'ai_gateway' => [
+        'enabled' => filter_var(env('AI_SERVICE_ENABLED', env('ENABLE_AI_SERVICE', false)), FILTER_VALIDATE_BOOLEAN),
         'base_url' => rtrim((string) env('AI_SERVICE_BASE_URL', 'http://localhost:5000'), '/'),
         'timeout' => (int) env('AI_SERVICE_TIMEOUT', 30),
         'api_key' => env('AI_SERVICE_API_KEY', ''),

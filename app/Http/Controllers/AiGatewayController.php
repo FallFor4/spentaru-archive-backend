@@ -18,6 +18,13 @@ class AiGatewayController extends Controller
 
     public function askChat(AskChatRequest $request)
     {
+        if (! config('services.ai_gateway.enabled', false)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Layanan AI sedang dinonaktifkan di sistem',
+            ], 503);
+        }
+
         $validated = $request->validated();
         $traceId = trim((string) $validated['x_trace_id']);
         $aiBaseUrl = rtrim((string) config('services.ai_gateway.base_url', 'http://localhost:5000'), '/');
