@@ -30,6 +30,9 @@ Route::prefix('v1')->group(function () {
             Route::get('/internal', [ArchiveController::class, 'index'])->middleware('throttle:60,1');
         });
 
+        Route::get('/{id}/preview', [ArchiveController::class, 'preview'])->middleware('throttle:60,1');
+        Route::get('/{id}/download', [ArchiveController::class, 'download'])->middleware('throttle:30,1');
+
         Route::middleware('auth:sanctum')->group(function () {
             Route::get('/', [ArchiveController::class, 'index'])->middleware('throttle:60,1');
             Route::post('/', [ArchiveController::class, 'store'])->middleware('throttle:30,1');
@@ -40,8 +43,6 @@ Route::prefix('v1')->group(function () {
             Route::get('/{id}', [ArchiveController::class, 'show']);
             Route::put('/{id}', [ArchiveController::class, 'update'])->middleware('throttle:30,1');
             Route::delete('/{id}', [ArchiveController::class, 'destroy'])->middleware(['throttle:10,1', 'admin']);
-            Route::get('/{id}/preview', [ArchiveController::class, 'preview'])->middleware('throttle:60,1');
-            Route::get('/{id}/download', [ArchiveController::class, 'download'])->middleware('throttle:30,1');
 
             Route::get('/{id}/physical-locations', [ArchivePhysicalLocationController::class, 'show']);
             Route::post('/{id}/physical-locations', [ArchivePhysicalLocationController::class, 'store'])->middleware('throttle:30,1');

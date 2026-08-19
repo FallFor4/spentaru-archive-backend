@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Support\Str as SupportStr;
+use Laravel\Sanctum\PersonalAccessToken;
 
 class ArchiveController extends Controller
 {
@@ -729,21 +730,64 @@ class ArchiveController extends Controller
         }
     }
 
-    public function preview(string $id)
+    private function authenticatePreviewRequest(Request $request): void
     {
-        $archive = Archive::with('files')->findOrFail($id);
+        if (Auth::guard('sanctum')->check() || Auth::check()) {
+            return;
+        }
 
-        $storagePath = $this->requireArchiveFilePath($archive->files);
+        $token = $request->bearerToken() ?: $request->query('token');
+        if ($token) {
+            $accessToken = PersonalAccessToken::findToken($token);
+            if ($accessToken && (! $accessToken->expires_at || ! $accessToken->expires_at->isPast())) {
+                Auth::setUser($accessToken->tokenable);
+                return;
+            }
+        }
 
-        return Storage::disk(self::getArchiveDisk())->response($storagePath, $archive->files->file_name);
+        abort(response()->json([
+            'status' => 'error',
+            'message' => 'Unauthenticated.',
+        ], 401));
     }
 
-    public function download(string $id)
+    public function preview(Request $request, string $id)
     {
+        $this->authenticatePreviewRequest($request);
+
         $archive = Archive::with('files')->findOrFail($id);
 
         $storagePath = $this->requireArchiveFilePath($archive->files);
 
-        return Storage::disk(self::getArchiveDisk())->download($storagePath, $archive->files->file_name);
+        $disk = Storage::disk(self::getArchiveDisk());
+
+        if (! $disk->exists($storagePath)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'File tidak ditemukan',
+            ], 404);
+        }
+
+        return $disk->response($storagePath, $archive->files->file_name);
+    }
+
+    public function download(Request $request, string $id)
+    {
+        $this->authenticatePreviewRequest($request);
+
+        $archive = Archive::with('files')->findOrFail($id);
+
+        $storagePath = $this->requireArchiveFilePath($archive->files);
+
+        $disk = Storage::disk(self::getArchiveDisk());
+
+        if (! $disk->exists($storagePath)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'File tidak ditemukan',
+            ], 404);
+        }
+
+        return $disk->download($storagePath, $archive->files->file_name);
     }
 }
